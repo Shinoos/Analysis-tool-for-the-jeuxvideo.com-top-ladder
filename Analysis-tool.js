@@ -1,3 +1,25 @@
+let _isPaused = false;
+let lastScannedIndex = 0;
+let currentPageNumber = 1;
+
+function pauseAnalysis() {
+    if (_isPaused) {
+        console.log("L'analyse est déjà en pause.");
+        return;
+    }
+    _isPaused = true;
+    console.log("Pause demandée.");
+}
+
+function resumeAnalysis() {
+    if (!_isPaused) {
+        console.log("L'analyse n'est pas en pause.");
+        return;
+    }
+    _isPaused = false;
+    console.log("Reprise de l'analyse.");
+}
+
 async function fetchProfileData(profileUrl) {
     try {
         const response = await fetch(profileUrl);
@@ -33,7 +55,22 @@ async function analyzeLeaderboard(pageNumber) {
     const users = doc.querySelectorAll('.leaderboardRanking__rankingList');
     let globalCounter = (pageNumber - 1) * 50 + 1;
 
-    for (let user of users) {
+    for (let i = lastScannedIndex; i < users.length; i++) {
+        if (_isPaused) {
+            lastScannedIndex = i;
+            currentPageNumber = pageNumber;
+            console.log("Analyse en pause, en attente de reprise...");
+            await new Promise(resolve => {
+                const interval = setInterval(() => {
+                    if (!_isPaused) {
+                        clearInterval(interval);
+                        resolve();
+                    }
+                }, 100);
+            });
+        }
+
+        const user = users[i];
         const pseudo = user.querySelector('.leaderboardRanking__link') ? user.querySelector('.leaderboardRanking__link').textContent.trim().toLowerCase() : null;
 
         if (!pseudo) {
@@ -56,20 +93,20 @@ async function analyzeLeaderboard(pageNumber) {
         globalCounter++;
     }
 
+    lastScannedIndex = 0;
     return leaderboardData;
 }
 
 async function processAllPages() {
-    let pageNumber = 1;
     let allLeaderboardData = [];
 
-    while (pageNumber <= 925) { // ← À ajuster selon besoin 
-        console.log(`\nAnalyse de la page ${pageNumber}...`);
+    while (currentPageNumber <= 925) { // ← À ajuster selon besoin
+        console.log(`\nAnalyse de la page ${currentPageNumber}...`);
 
-        const leaderboardData = await analyzeLeaderboard(pageNumber);
+        const leaderboardData = await analyzeLeaderboard(currentPageNumber);
         allLeaderboardData = allLeaderboardData.concat(leaderboardData);
 
-        pageNumber++;
+        currentPageNumber++;
     }
 
     allLeaderboardData.sort((a, b) => {
