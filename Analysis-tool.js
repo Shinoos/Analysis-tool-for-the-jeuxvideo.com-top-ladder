@@ -1,35 +1,52 @@
-let _isPaused = false;
+let isPaused = false;
 let currentPageNumber = 1;
+const maxRetries = 10;
+const retryDelay = 15000;
+
 
 function pauseAnalysis() {
-	if (_isPaused) {
+	if (isPaused) {
 		console.log("L'analyse est déjà en pause.");
 		return;
 	}
-	_isPaused = true;
+	isPaused = true;
 	console.log("Pause demandée.");
 }
 
 function resumeAnalysis() {
-	if (!_isPaused) {
+	if (!isPaused) {
 		console.log("L'analyse n'est pas en pause.");
 		return;
 	}
-	_isPaused = false;
+	isPaused = false;
 	console.log("Reprise de l'analyse.");
 }
 
-async function fetchProfileData(profileUrl) {
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function fetchProfileData(profileUrl, retryCount = 0) {
 	try {
 		const response = await fetch(profileUrl);
-		const html = await response.text();
 
+		if (response.status === 429) {
+			if (retryCount < maxRetries) {
+				console.log(`Rate limit atteint pour ${profileUrl}, nouvelle tentative dans ${retryDelay/1000} secondes... (Tentative ${retryCount + 1}/${maxRetries})`);
+				await delay(retryDelay);
+				return fetchProfileData(profileUrl, retryCount + 1);
+			} else {
+				console.log(`Échec après ${maxRetries} tentatives pour ${profileUrl}`);
+				return {
+					messages: "erreur_429",
+					level: "erreur_429"
+				};
+			}
+		}
+
+		const html = await response.text();
 		const parser = new DOMParser();
 		const doc = parser.parseFromString(html, 'text/html');
-
 		const messagesElement = [...doc.querySelectorAll('.info-lib')].find(el => el.textContent.includes('Messages Forums'));
 		const messages = messagesElement ? parseInt(messagesElement.nextElementSibling.textContent.trim().replace(/\D/g, '')) : "caché";
-
 		const levelElement = doc.querySelector('.user-level .ladder-link');
 		const level = levelElement ? levelElement.textContent.trim().replace('Niveau', '').trim() : "inconnu";
 
@@ -37,33 +54,35 @@ async function fetchProfileData(profileUrl) {
 			messages,
 			level
 		};
-
 	} catch (error) {
+		if (retryCount < maxRetries) {
+			console.log(`Erreur pour ${profileUrl}, nouvelle tentative... (Tentative ${retryCount + 1}/${maxRetries})`);
+			await delay(retryDelay);
+			return fetchProfileData(profileUrl, retryCount + 1);
+		}
+
 		console.error('Erreur lors de l\'extraction des données du profil:', error);
 		return {
-			messages: "caché",
-			level: "inconnu"
+			messages: "erreur",
+			level: "erreur"
 		};
 	}
 }
 
 async function analyzeLeaderboard(pageNumber) {
 	const url = `https://www.jeuxvideo.com/concours/ladder/?p=${pageNumber}`;
-
 	const response = await fetch(url);
 	const html = await response.text();
-
 	const parser = new DOMParser();
 	const doc = parser.parseFromString(html, 'text/html');
-
 	const users = doc.querySelectorAll('.leaderboardRanking__rankingList');
 	let globalCounter = (pageNumber - 1) * 50 + 1;
 
-	if (_isPaused) {
+	if (isPaused) {
 		console.log("Analyse en pause, en attente de reprise...");
 		await new Promise(resolve => {
 			const interval = setInterval(() => {
-				if (!_isPaused) {
+				if (!isPaused) {
 					clearInterval(interval);
 					resolve();
 				}
@@ -73,7 +92,6 @@ async function analyzeLeaderboard(pageNumber) {
 
 	const profilePromises = Array.from(users).map(async (user, index) => {
 		const pseudo = user.querySelector('.leaderboardRanking__link')?.textContent.trim().toLowerCase();
-
 		if (!pseudo) {
 			console.error('Profil sans pseudo trouvé, impossible de continuer.');
 			return null;
@@ -85,8 +103,18 @@ async function analyzeLeaderboard(pageNumber) {
 			level
 		} = await fetchProfileData(profileUrl);
 
-		console.log(`#${globalCounter + index} Pseudo: ${pseudo}, Niveau: ${level}, Messages: ${messages}`);
+		if (messages === "erreur_429") {
+			console.log(`Profil ${pseudo} mis en attente pour réessai ultérieur`);
+			return {
+				pseudo,
+				level: "en_attente",
+				messages: "en_attente",
+				retry: true,
+				profileUrl
+			};
+		}
 
+		console.log(`#${globalCounter + index} Pseudo: ${pseudo}, Niveau: ${level}, Messages: ${messages}`);
 		return {
 			pseudo,
 			level,
@@ -100,14 +128,40 @@ async function analyzeLeaderboard(pageNumber) {
 
 async function processAllPages() {
 	let allLeaderboardData = [];
+	let profilesToRetry = [];
 
-	while (currentPageNumber <= 925) { // ← À ajuster selon besoin
+	while (currentPageNumber <= 925) {
 		console.log(`\nAnalyse de la page ${currentPageNumber}...`);
-
 		const leaderboardData = await analyzeLeaderboard(currentPageNumber);
-		allLeaderboardData = allLeaderboardData.concat(leaderboardData);
+
+		const profilesSucceeded = leaderboardData.filter(p => !p.retry);
+		const newProfilesToRetry = leaderboardData.filter(p => p.retry);
+
+		allLeaderboardData = allLeaderboardData.concat(profilesSucceeded);
+		profilesToRetry = profilesToRetry.concat(newProfilesToRetry);
 
 		currentPageNumber++;
+
+		await delay(1000);
+	}
+
+	if (profilesToRetry.length > 0) {
+		console.log(`\nRéessai des ${profilesToRetry.length} profils qui ont échoué...`);
+		for (const profil of profilesToRetry) {
+			await delay(retryDelay);
+			const {
+				messages,
+				level
+			} = await fetchProfileData(profil.profileUrl);
+			if (messages !== "erreur_429") {
+				allLeaderboardData.push({
+					pseudo: profil.pseudo,
+					level,
+					messages
+				});
+				console.log(`Profil récupéré avec succès: ${profil.pseudo}`);
+			}
+		}
 	}
 
 	allLeaderboardData.sort((a, b) => {
@@ -116,13 +170,12 @@ async function processAllPages() {
 		return messagesB - messagesA;
 	});
 
-	const classementFinal = allLeaderboardData.map((user, index) =>
+	const finalLeaderboard = allLeaderboardData.map((user, index) =>
 		`#${index + 1} Pseudo: ${user.pseudo}, Niveau: ${user.level}, Messages: ${user.messages}`
 	).join('\n');
 
 	const endDate = new Date().toLocaleString();
-
-	console.log("\nClassement final des plus gros posteurs :\n\n" + classementFinal + `\n\nDate de fin: ${endDate}`);
+	console.log("\nClassement final des plus gros posteurs :\n\n" + finalLeaderboard + `\n\nDate de fin: ${endDate}`);
 }
 
 processAllPages();
